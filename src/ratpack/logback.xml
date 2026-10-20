@@ -1,0 +1,16 @@
+<configuration>
+    <appender name="STDOUT" class="ch.qos.logback.core.ConsoleAppender">
+        <encoder>
+            <pattern>%blue(%d{yyyy-MM-dd HH:mm:ss.SSS}) %green([%15.15thread]) - %yellow(%-5level) %cyan(%-40.40logger{39}) : %magenta(%msg) %n</pattern>
+        </encoder>
+    </appender>
+
+    <logger name="ratpack" level="INFO"/>
+    <logger name="org.jooq" level="WARN"/>
+    <logger name="com.zaxxer.hikari" level="INFO"/>
+    <logger name="finance" level="INFO"/>
+
+    <root level="WARN">
+        <appender-ref ref="STDOUT"/>
+    </root>
+</configuration>

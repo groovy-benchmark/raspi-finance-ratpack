@@ -1,0 +1,154 @@
+import nu.studer.gradle.jooq.JooqEdition
+import groovy.json.JsonSlurper
+
+// Removed buildscript block as plugins are now applied via plugins DSL
+
+plugins {
+    id 'idea'
+    id 'eclipse'
+    id 'io.ratpack.ratpack-groovy' version "${ratpackVersion}"
+    id "com.gradleup.shadow" version "${shadowVersion}"
+    id "com.github.ben-manes.versions" version "${gradleVersionsPlugin}"
+    id 'nu.studer.jooq' version "${jooqPluginVersion}"
+    id 'codenarc'
+}
+
+codenarc {
+    toolVersion = "${codenarcVersion}"
+    ignoreFailures = true
+}
+
+tasks.withType(CodeNarc).configureEach {
+    // The Groovy shell used to evaluate the DSL ruleset cannot read Java 21 class
+    // files; clearing compilationClasspath prevents it from loading project classes.
+    compilationClasspath = files()
+    reports {
+        xml.required = true
+        html.required = true
+    }
+}
+
+codenarcMain {
+    configFile = file('config/codenarc/codenarc-main.xml')
+}
+
+codenarcTest {
+    configFile = file('config/codenarc/codenarc-test.xml')
+}
+
+repositories {
+    mavenCentral()
+}
+
+dependencyLocking {
+    lockAllConfigurations()
+}
+
+test {
+    useJUnitPlatform()
+}
+
+dependencies {
+
+    implementation ratpack.dependency("guice")
+    //   compile ratpack.dependency("jackson")
+    // RxJava removed in Ratpack 2.0 - uses Reactive Streams instead
+    // implementation ratpack.dependency("rx")
+//    compile ratpack.dependency("hystrix")
+    implementation ratpack.dependency("hikari")
+    implementation ratpack.dependency("h2")
+    implementation ratpack.dependency("groovy")
+
+    runtimeOnly("ch.qos.logback:logback-classic:${logbackVersion}")
+    implementation("org.slf4j:jul-to-slf4j:${slf4jVersion}")
+
+    //Groovy 3.0 - using codehaus namespace to match Ratpack 2.0 requirements
+    implementation("org.codehaus.groovy:groovy:${groovyVersion}")
+    implementation("org.codehaus.groovy:groovy-json:${groovyVersion}")
+    implementation("org.codehaus.groovy:groovy-xml:${groovyVersion}")
+    implementation("org.codehaus.groovy:groovy-sql:${groovyVersion}")
+    implementation("org.codehaus.groovy:groovy-templates:${groovyVersion}")
+
+    // JOOQ
+    implementation("org.jooq:jooq:${jooqVersion}")
+
+    // JWT
+    implementation("io.jsonwebtoken:jjwt-api:${jjwtVersion}")
+    runtimeOnly("io.jsonwebtoken:jjwt-impl:${jjwtVersion}")
+    runtimeOnly("io.jsonwebtoken:jjwt-jackson:${jjwtVersion}")
+
+    // BCrypt password hashing
+    implementation("org.mindrot:jbcrypt:${jbcryptVersion}")
+
+    testImplementation("org.spockframework:spock-core:2.3-groovy-3.0")
+    testImplementation("net.bytebuddy:byte-buddy:1.18.10")
+    testImplementation("org.objenesis:objenesis:3.5")
+    testRuntimeOnly("org.junit.platform:junit-platform-launcher")
+
+    //graphql
+    //implementation "com.github.grooviter:gql-ratpack:0.3.0"
+    //implementation "com.github.grooviter:gql-core:0.4.0"
+
+    //postgreSQL
+    runtimeOnly("org.postgresql:postgresql:${postgresqlVersion}")
+    jooqGenerator("org.postgresql:postgresql:${postgresqlVersion}")
+
+    //H2
+    implementation("com.h2database:h2:${h2Version}")
+
+
+    //hibernate
+    //implementation 'org.grails:grails-datastore-gorm-hibernate5:7.0.2.RELEASE'
+}
+
+
+def dbCfg = new JsonSlurper().parse(file('src/ratpack/db_config.json')).database
+
+jooq {
+    version = "${jooqVersion}"
+    edition = JooqEdition.OSS
+    configurations {
+        main {
+            generateSchemaSourceOnCompilation = false
+
+               generationTool {
+                   jdbc {
+                       driver = 'org.postgresql.Driver'
+                       url = dbCfg.jdbcUrl
+                       user = dbCfg.username
+                       password = dbCfg.password
+                   }
+
+                   generator {
+                       name = 'org.jooq.codegen.DefaultGenerator'
+                       database {
+                            name = 'org.jooq.meta.postgres.PostgresDatabase'
+                            inputSchema = 'public'
+                            //includes = 't_category, t_description'
+                            //excludes = ''
+                       }
+                       generate {
+                           deprecated = false
+                           records = true
+                           immutablePojos = true
+                           fluentSetters = true
+                       }
+
+                       strategy.name = 'org.jooq.codegen.DefaultGeneratorStrategy'
+                   }
+              }
+        }
+    }
+}
+
+shadowJar {
+    archiveBaseName.set(rootProject.name)
+    archiveClassifier.set('')
+    archiveVersion.set('')
+    mergeServiceFiles()
+}
+
+tasks.named('distZip') { dependsOn shadowJar }
+tasks.named('distTar') { dependsOn shadowJar }
+tasks.named('startScripts') { dependsOn shadowJar }
+tasks.named('startShadowScripts') { dependsOn jar }

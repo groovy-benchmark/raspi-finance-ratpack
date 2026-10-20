@@ -1,0 +1,181 @@
+package finance.repositories
+
+import com.google.inject.Inject
+import finance.domain.Account
+import groovy.util.logging.Slf4j
+import org.jooq.DSLContext
+import org.jooq.SQLDialect
+import org.jooq.impl.DSL
+
+import javax.sql.DataSource
+
+import static org.jooq.generated.Tables.T_ACCOUNT
+import static org.jooq.generated.Tables.T_TRANSACTION
+
+@Slf4j
+class AccountRepository {
+    private final DSLContext dslContext
+
+    @Inject
+    AccountRepository(DataSource dataSource) {
+        this.dslContext = DSL.using(dataSource, SQLDialect.POSTGRES)
+    }
+
+    boolean accountInsert(Account account) {
+        dslContext.insertInto(T_ACCOUNT)
+                .set(T_ACCOUNT.OWNER, account.owner ?: "")
+                .set(T_ACCOUNT.ACCOUNT_NAME_OWNER, (String) account.accountNameOwner)
+                .set(T_ACCOUNT.ACCOUNT_TYPE, (String) account.accountType?.name()?.toLowerCase())
+                .set(T_ACCOUNT.ACTIVE_STATUS, (Boolean) account.activeStatus)
+                .set(T_ACCOUNT.MONIKER, account.moniker ?: "0000")
+                .execute()
+        return true
+    }
+
+    boolean accountUpdate(Account account) {
+        dslContext.update(T_ACCOUNT)
+                .set(T_ACCOUNT.ACCOUNT_TYPE, account.accountType?.name()?.toLowerCase())
+                .set(T_ACCOUNT.MONIKER, account.moniker ?: "0000")
+                .set(T_ACCOUNT.ACTIVE_STATUS, account.activeStatus)
+                .where(T_ACCOUNT.ACCOUNT_NAME_OWNER.eq(account.accountNameOwner))
+                .execute()
+        return true
+    }
+
+    boolean accountRename(String oldAccountNameOwner, String newAccountNameOwner) {
+        dslContext.update(T_ACCOUNT)
+                .set(T_ACCOUNT.ACCOUNT_NAME_OWNER, newAccountNameOwner)
+                .where(T_ACCOUNT.ACCOUNT_NAME_OWNER.eq(oldAccountNameOwner))
+                .execute()
+        return true
+    }
+
+    boolean accountDeactivate(String accountNameOwner) {
+        dslContext.update(T_ACCOUNT)
+                .set(T_ACCOUNT.ACTIVE_STATUS, false)
+                .where(T_ACCOUNT.ACCOUNT_NAME_OWNER.eq(accountNameOwner))
+                .execute()
+        return true
+    }
+
+    boolean accountActivate(String accountNameOwner) {
+        dslContext.update(T_ACCOUNT)
+                .set(T_ACCOUNT.ACTIVE_STATUS, true)
+                .where(T_ACCOUNT.ACCOUNT_NAME_OWNER.eq(accountNameOwner))
+                .execute()
+        return true
+    }
+
+    int reactivateAllTransactionsByAccountNameOwner(String accountNameOwner) {
+        return dslContext.execute(
+            "UPDATE t_transaction SET active_status = true, date_updated = now() WHERE account_name_owner = ?",
+            accountNameOwner
+        )
+    }
+
+    long countTransactionsByAccountNameOwner(String accountNameOwner) {
+        return dslContext.fetchCount(
+            dslContext.selectFrom(T_TRANSACTION)
+                .where(T_TRANSACTION.ACCOUNT_NAME_OWNER.eq(accountNameOwner))
+        )
+    }
+
+    List<Account> accounts() {
+        return dslContext.selectFrom(T_ACCOUNT)
+                .where(T_ACCOUNT.ACTIVE_STATUS.eq(true))
+                .orderBy(T_ACCOUNT.ACCOUNT_NAME_OWNER)
+                .fetchInto(Account)
+    }
+
+    List<Account> accountsRequiringPayment() {
+        return dslContext.selectFrom(T_ACCOUNT)
+                .where(T_ACCOUNT.ACTIVE_STATUS.eq(true)
+                    .and(T_ACCOUNT.ACCOUNT_TYPE.eq("credit"))
+                    .and(T_ACCOUNT.OUTSTANDING.gt(BigDecimal.ZERO)
+                        .or(T_ACCOUNT.FUTURE.gt(BigDecimal.ZERO))
+                        .or(T_ACCOUNT.CLEARED.gt(BigDecimal.ZERO))))
+                .orderBy(T_ACCOUNT.ACCOUNT_NAME_OWNER)
+                .fetchInto(Account)
+    }
+
+    Account account(String accountNameOwner) {
+        return dslContext.selectFrom(T_ACCOUNT)
+                .where(T_ACCOUNT.ACCOUNT_NAME_OWNER.equal(accountNameOwner))
+                .fetchOneInto(Account)
+    }
+
+    boolean accountDelete(String accountNameOwner) {
+        dslContext.delete(T_ACCOUNT)
+                .where(T_ACCOUNT.ACCOUNT_NAME_OWNER.equal(accountNameOwner))
+                .execute()
+        return true
+    }
+
+    boolean updateTotalsForAllAccounts() {
+        dslContext.execute("""
+            UPDATE t_account SET
+                cleared = x.cleared,
+                outstanding = x.outstanding,
+                future = x.future,
+                date_updated = now()
+            FROM (
+                SELECT account_name_owner,
+                    SUM(CASE WHEN transaction_state = 'cleared' THEN amount ELSE 0 END) AS cleared,
+                    SUM(CASE WHEN transaction_state = 'outstanding' THEN amount ELSE 0 END) AS outstanding,
+                    SUM(CASE WHEN transaction_state = 'future' THEN amount ELSE 0 END) AS future
+                FROM t_transaction
+                WHERE active_status = true
+                GROUP BY account_name_owner
+            ) x
+            WHERE t_account.account_name_owner = x.account_name_owner
+        """)
+        return true
+    }
+
+    void updateValidationDates() {
+        dslContext.execute("""
+            UPDATE t_account a
+            SET validation_date = sub.max_validation_date,
+                date_updated = now()
+            FROM (
+                SELECT va.account_id, MAX(va.validation_date) AS max_validation_date
+                FROM t_validation_amount va
+                WHERE va.active_status = TRUE
+                GROUP BY va.account_id
+            ) sub
+            WHERE a.account_id = sub.account_id
+        """)
+    }
+
+    void updateValidationDateForAccount(Long accountId) {
+        dslContext.execute("""
+            UPDATE t_account a
+            SET validation_date = sub.max_validation_date,
+                date_updated = now()
+            FROM (
+                SELECT va.account_id, MAX(va.validation_date) AS max_validation_date
+                FROM t_validation_amount va
+                WHERE va.active_status = TRUE
+                GROUP BY va.account_id
+            ) sub
+            WHERE a.account_id = sub.account_id
+            AND a.account_id = ?
+        """, accountId)
+    }
+
+    BigDecimal sumTransactionsByState(String transactionState) {
+        BigDecimal debits = dslContext.select(DSL.coalesce(DSL.sum(T_TRANSACTION.AMOUNT), BigDecimal.ZERO))
+                .from(T_TRANSACTION)
+                .where(T_TRANSACTION.ACCOUNT_TYPE.eq("debit")
+                        .and(T_TRANSACTION.TRANSACTION_STATE.eq(transactionState))
+                        .and(T_TRANSACTION.ACTIVE_STATUS.eq(true)))
+                .fetchOneInto(BigDecimal)
+        BigDecimal credits = dslContext.select(DSL.coalesce(DSL.sum(T_TRANSACTION.AMOUNT), BigDecimal.ZERO))
+                .from(T_TRANSACTION)
+                .where(T_TRANSACTION.ACCOUNT_TYPE.eq("credit")
+                        .and(T_TRANSACTION.TRANSACTION_STATE.eq(transactionState))
+                        .and(T_TRANSACTION.ACTIVE_STATUS.eq(true)))
+                .fetchOneInto(BigDecimal)
+        return (debits ?: BigDecimal.ZERO) - (credits ?: BigDecimal.ZERO)
+    }
+}
